@@ -1,0 +1,89 @@
+rules_version = '2';
+
+// Tenant isolation is enforced HERE, not in client code (see CLAUDE.md,
+// docs/architecture/authorization.md). The `role` and `schoolId` used below
+// come from the Firebase Auth custom claims set server-side by
+// `functions/src/index.ts` in response to a `schoolMemberships` write — they
+// are never read from a client-supplied field, so a client cannot grant
+// itself access to another school by sending a different `schoolId`.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function tokenRole() {
+      return request.auth.token.role;
+    }
+
+    function tokenSchoolId() {
+      return request.auth.token.schoolId;
+    }
+
+    function isPlatformAdmin() {
+      return isSignedIn() && tokenRole() == 'platform_admin';
+    }
+
+    function isSchoolAdminOf(schoolId) {
+      return isSignedIn() && tokenRole() == 'school_admin' && tokenSchoolId() == schoolId;
+    }
+
+    // Platform-owned: lifecycle (create/suspend) is a Platform Admin action.
+    // A School Admin may only read their OWN school — never another one,
+    // even if they manipulate the document id in the request.
+    match /schools/{schoolId} {
+      allow read: if isPlatformAdmin() || isSchoolAdminOf(schoolId);
+      allow write: if isPlatformAdmin();
+    }
+
+    // The application user profile. A user may read/create/update only
+    // their own profile (uid == document id). Platform Admins may read any
+    // profile for support/administration purposes.
+    match /users/{userId} {
+      allow read: if isPlatformAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isPlatformAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow delete: if isPlatformAdmin();
+    }
+
+    // Tenant-owned: role/school assignment is privileged. Clients — even an
+    // authenticated School Admin — can NEVER write their own membership;
+    // this is what stops a client from self-granting a role or switching
+    // which school it belongs to. Only a Platform Admin (or, in practice,
+    // the Admin SDK from a trusted server context) may write.
+    match /schoolMemberships/{membershipId} {
+      allow read: if isPlatformAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid)
+        || (isSignedIn() && tokenRole() == 'school_admin' && resource.data.schoolId == tokenSchoolId());
+      allow write: if isPlatformAdmin();
+    }
+
+    // Reference data: the static role -> permission catalog. Readable by any
+    // signed-in user, never writable by a client.
+    match /roles/{roleId} {
+      allow read: if isSignedIn();
+      allow write: if isPlatformAdmin();
+    }
+
+    // Append-only audit trail. A signed-in user may create a record of
+    // their OWN action, scoped to their OWN school (or unscoped if they are
+    // a Platform Admin) — never on behalf of another user or another
+    // school. Update/delete are always denied so the trail stays immutable.
+    match /auditLogs/{auditLogId} {
+      allow create: if isSignedIn()
+        && request.resource.data.actorUserId == request.auth.uid
+        && (isPlatformAdmin() || request.resource.data.schoolId == tokenSchoolId());
+      allow read: if isPlatformAdmin()
+        || (isSignedIn() && tokenRole() == 'school_admin' && resource.data.schoolId == tokenSchoolId());
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // Deny everything not explicitly matched above (including every future
+    // collection until it gets its own rule in a later phase).
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

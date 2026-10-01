@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "development": "eazyschool360-dev",
+    "uat": "eazyschool360-uat",
+    "production": "eazyschool360-prod",
+    "default": "eazyschool360-dev"
+  }
+}
